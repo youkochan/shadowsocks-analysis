@@ -58,6 +58,8 @@ def main():
     tcp_servers = []
     udp_servers = []
     dns_resolver = asyncdns.DNSResolver()
+    # 一个服务器端可以打开多个端口
+    # 对于每个端口，都要新建一个对应的处理器
     port_password = config['port_password']
     del config['port_password']
     for port, password in port_password.items():
@@ -84,6 +86,7 @@ def main():
         try:
             loop = eventloop.EventLoop()
             dns_resolver.add_to_loop(loop)
+            # 这是一条神奇的语句
             list(map(lambda s: s.add_to_loop(loop), tcp_servers + udp_servers))
 
             daemon.set_user(config.get('user', None))

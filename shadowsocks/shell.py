@@ -32,6 +32,8 @@ VERBOSE_LEVEL = 5
 verbose = 0
 
 
+# 用于检查 Python 版本号
+# 不符合直接退出程序
 def check_python():
     info = sys.version_info
     if info[0] == 2 and not info[1] >= 6:
@@ -73,6 +75,7 @@ def find_config():
     return None
 
 
+# 检查初始化参数是否合理
 def check_config(config, is_local):
     if config.get('daemon', None) == 'stop':
         # no need to specify configuration for daemon stop
@@ -125,6 +128,7 @@ def check_config(config, is_local):
     encrypt.try_cipher(config['password'], config['method'])
 
 
+# 获取初始化选项
 def get_config(is_local):
     global verbose
 
@@ -215,6 +219,7 @@ def get_config(is_local):
         print_help(is_local)
         sys.exit(2)
 
+    # 根据初始参数来填充 config 字典。get 后面的参数表示默认值
     config['password'] = to_bytes(config.get('password', b''))
     config['method'] = to_str(config.get('method', 'aes-256-cfb'))
     config['port_password'] = config.get('port_password', None)
@@ -265,6 +270,7 @@ def get_config(is_local):
     return config
 
 
+# 根据是否是local来打印提示信息
 def print_help(is_local):
     if is_local:
         print_local_help()
@@ -272,6 +278,7 @@ def print_help(is_local):
         print_server_help()
 
 
+# 打印local提示信息
 def print_local_help():
     print('''usage: sslocal [OPTION]...
 A fast tunnel proxy that helps you bypass firewalls.
@@ -303,6 +310,7 @@ Online help: <https://github.com/shadowsocks/shadowsocks>
 ''')
 
 
+# 打印server提示信息
 def print_server_help():
     print('''usage: ssserver [OPTION]...
 A fast tunnel proxy that helps you bypass firewalls.

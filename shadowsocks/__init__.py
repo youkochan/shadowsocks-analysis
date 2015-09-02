@@ -14,5 +14,10 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+# 2015-08-13 22:56 BY Youkochan
+# 这个文件貌似就是没啥用的喵。
+# 其实还是有卵用的，为了外面能直接导入shadowsocks这个文件夹的文件。
+# 否则无法直接导入。
+
 from __future__ import absolute_import, division, print_function, \
     with_statement

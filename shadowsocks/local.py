@@ -28,6 +28,7 @@ from shadowsocks import shell, daemon, eventloop, tcprelay, udprelay, asyncdns
 
 
 def main():
+    # 检查Python版本是否符合要求
     shell.check_python()
 
     # fix py2exe
@@ -56,10 +57,14 @@ def main():
             logging.warn('received SIGQUIT, doing graceful shutting down..')
             tcp_server.close(next_tick=True)
             udp_server.close(next_tick=True)
+
+        # 注册信号事件，用于结束 local 程序
         signal.signal(getattr(signal, 'SIGQUIT', signal.SIGTERM), handler)
 
         def int_handler(signum, _):
             sys.exit(1)
+
+        # SIGINT external interrupt, usually initiated by the user
         signal.signal(signal.SIGINT, int_handler)
 
         daemon.set_user(config.get('user', None))

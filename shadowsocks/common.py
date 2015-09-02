@@ -15,6 +15,10 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+# 2015-08-13 22:59 BY Youkochan
+# 各种共用函数，包括解析 connect request 报文函数
+# 以及转换 IP 地址的函数
+
 from __future__ import absolute_import, division, print_function, \
     with_statement
 
@@ -35,6 +39,11 @@ def compat_chr(d):
     return bytes([d])
 
 
+# ord: Given a string of length one, 
+# return an integer representing the Unicode code point of the character when the argument is a unicode object, 
+# or the value of the byte when the argument is an 8-bit string. 
+# chr: Return a string of one character whose ASCII code is the integer i. 
+# This is the inverse of ord().
 _ord = ord
 _chr = chr
 ord = compat_ord

@@ -91,25 +91,37 @@ BUF_SIZE = 32 * 1024
 
 
 class TCPRelayHandler(object):
+    """
+    处理TCP连接的类
+    """
+
     def __init__(self, server, fd_to_handlers, loop, local_sock, config,
                  dns_resolver, is_local):
         self._server = server
         self._fd_to_handlers = fd_to_handlers
+        # 封装好的事件轮询器
         self._loop = loop
+        # 接收/发送本地数据的socket
         self._local_sock = local_sock
+        # 接收/发送远程数据的socket
         self._remote_sock = None
+        # 初始化配置
         self._config = config
+        # 封装好的DNS查询器
         self._dns_resolver = dns_resolver
 
         # TCP Relay works as either sslocal or ssserver
         # if is_local, this is sslocal
         self._is_local = is_local
+        # 初始化状态机
         self._stage = STAGE_INIT
         self._encryptor = encrypt.Encryptor(config['password'],
                                             config['method'])
         self._fastopen_connected = False
+        # 发送以及接收缓冲列表
         self._data_to_write_to_local = []
         self._data_to_write_to_remote = []
+        # 初始化流状态，决定了是否监听相应的事件
         self._upstream_status = WAIT_STATUS_READING
         self._downstream_status = WAIT_STATUS_INIT
         self._client_address = local_sock.getpeername()[:2]
@@ -118,11 +130,13 @@ class TCPRelayHandler(object):
             self._forbidden_iplist = config['forbidden_ip']
         else:
             self._forbidden_iplist = None
+        # 若是sslocal，则随机选择一个服务器
         if is_local:
             self._chosen_server = self._get_a_server()
         fd_to_handlers[local_sock.fileno()] = self
         local_sock.setblocking(False)
         local_sock.setsockopt(socket.SOL_TCP, socket.TCP_NODELAY, 1)
+        # 事件轮询开始监听该socket
         loop.add(local_sock, eventloop.POLL_IN | eventloop.POLL_ERR,
                  self._server)
         self.last_activity = 0
@@ -138,6 +152,10 @@ class TCPRelayHandler(object):
         return self._remote_address
 
     def _get_a_server(self):
+        """
+        随机选一个代理服务器以及端口
+        :return:            (server, server_port)
+        """
         server = self._config['server']
         server_port = self._config['server_port']
         if type(server_port) == list:
@@ -148,11 +166,24 @@ class TCPRelayHandler(object):
         return server, server_port
 
     def _update_activity(self, data_len=0):
+        """
+        :param data_len:
+        :return:
+        """
         # tell the TCP Relay we have activities recently
         # else it will think we are inactive and timed out
         self._server.update_activity(self, data_len)
 
     def _update_stream(self, stream, status):
+        """
+        更新流状态，实际上就是根据需要进行的数据发送/接收状态
+        修改相应的SOCKET的状态以及绑定一些监听事件
+        通过这个函数就可以修改端口的状态，控制数据输入/输出
+        :param stream:      STREAM_DOWN / STREAM_UP
+        :param status:      WAIT_STATUS_WRITING / WAIT_STATUS_READING /
+                            WAIT_STATUS_READWRITING
+        :return:
+        """
         # update a stream to a new waiting status
 
         # check if status is changed
@@ -169,20 +200,31 @@ class TCPRelayHandler(object):
         if dirty:
             if self._local_sock:
                 event = eventloop.POLL_ERR
+                # downstream 有写事件，则给本地socket绑定写事件
                 if self._downstream_status & WAIT_STATUS_WRITING:
                     event |= eventloop.POLL_OUT
+                # upstream 有读事件，则给本地socket绑定等待读事件
                 if self._upstream_status & WAIT_STATUS_READING:
                     event |= eventloop.POLL_IN
                 self._loop.modify(self._local_sock, event)
             if self._remote_sock:
                 event = eventloop.POLL_ERR
+                # downstream 有读事件，则给远程socket绑定等待读事件
                 if self._downstream_status & WAIT_STATUS_READING:
                     event |= eventloop.POLL_IN
+                # upstream 有写事件，则给远程socket绑定写事件
                 if self._upstream_status & WAIT_STATUS_WRITING:
                     event |= eventloop.POLL_OUT
                 self._loop.modify(self._remote_sock, event)
 
     def _write_to_sock(self, data, sock):
+        """
+        这个函数实际不对sock进行操作
+        仅仅是更改upstream以及downstream的状态，最后由事件轮询来调用"_on_"前缀的函数来处理
+        :param data:        待发送的字节流
+        :param sock:        socket
+        :return:
+        """
         # write data to sock
         # if only some of the data are written, put remaining in the buffer
         # and update the stream to wait for writing
@@ -241,6 +283,7 @@ class TCPRelayHandler(object):
                 l = len(data)
                 s = remote_sock.sendto(data, MSG_FASTOPEN, self._chosen_server)
                 if s < l:
+                    # 未发送完，下一次接着发送
                     data = data[s:]
                     self._data_to_write_to_remote = [data]
                 else:
@@ -260,10 +303,37 @@ class TCPRelayHandler(object):
                         traceback.print_exc()
                     self.destroy()
 
+    # 认证机制相关的子协商完成后，SOCKS Client提交转发请求（单位：字节）
+    # +-----+-----+-------+------+----------+----------+
+    # | VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
+    # +-----+-----+-------+------+----------+----------+
+    # |  1  |  1  | X'00' |  1   | Variable |    2     |
+    # +-----+-----+-------+------+----------+----------+
+    # VER:      SOCKS协议版本号，'\x05'
+    # CMD:      转发请求的具体指令
+    # RSV:      保留字段，固定'\x00'
+    # ATYP:     指出DST.ADDR的类型（IPv4 or IPv6 or FQDN）
+    # DST.ADDR: CMD相关的具体地址信息
+    # DST.PORT: CMD相关的具体端口信息，big-endian序的2字节数据
+    #
+    # SOCKS Server根据提交的转发请求，发送响应包（单位：字节）
+    # +-----+-----+-------+------+----------+----------+
+    # | VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
+    # +-----+-----+-------+------+----------+----------+
+    # |  1  |  1  | X'00' |  1   | Variable |    2     |
+    # +-----+-----+-------+------+----------+----------+
+    # VER:      SOCKS协议版本号，'\x05'
+    # REP:      响应的具体值
+    # RSV:      保留字段，固定'\x00'
+    # ATYP:     指出BND.ADDR的类型（IPv4 or IPv6 or FQDN）
+    # BND.ADDR: CMD相关的具体地址信息
+    # BND.PORT: CMD相关的具体端口信息，big-endian序的2字节数据
+
     def _handle_stage_addr(self, data):
         try:
             if self._is_local:
                 cmd = common.ord(data[1])
+                # UDP穿透
                 if cmd == CMD_UDP_ASSOCIATE:
                     logging.debug('UDP associate')
                     if self._local_sock.family == socket.AF_INET6:
@@ -295,6 +365,11 @@ class TCPRelayHandler(object):
                           self._client_address[0], self._client_address[1]))
             self._remote_address = (common.to_str(remote_addr), remote_port)
             # pause reading
+            # 卧槽原来是这里啊！
+            # 想了好久要是处于 STAGE_ADDR 状态收到了本应在 STAGE_CONNECTING 阶段转发的数据怎么办
+            # 因为之前有一个 parse_header 操作，转发阶段的数据是没有 header 的。
+            # 原来是直接暂停了读取，因此在DNS请求完成之前（未跳转到 STAGE_CONNECTING 状态之前）
+            # 不会收到待转发的数据
             self._update_stream(STREAM_UP, WAIT_STATUS_WRITING)
             self._stage = STAGE_DNS
             if self._is_local:
@@ -320,6 +395,12 @@ class TCPRelayHandler(object):
             self.destroy()
 
     def _create_remote_socket(self, ip, port):
+        """
+        创建远程socket
+        :param ip:      待连接的ip地址
+        :param port:    待连接的端口地址
+        :return:        remote_socket
+        """
         addrs = socket.getaddrinfo(ip, port, 0, socket.SOCK_STREAM,
                                    socket.SOL_TCP)
         if len(addrs) == 0:
@@ -337,6 +418,11 @@ class TCPRelayHandler(object):
         return remote_sock
 
     def _handle_dns_resolved(self, result, error):
+        """
+        DNS请求解析完成后调用该函数
+        result:     (addr, ip)
+        error:      error
+        """
         if error:
             self._log_error(error)
             self.destroy()
@@ -348,6 +434,8 @@ class TCPRelayHandler(object):
                 try:
                     self._stage = STAGE_CONNECTING
                     remote_addr = ip
+                    # 若为sslocal，则remote_socket连接的端口为初始化文件中的服务器端口
+                    # 若为ssserver，则remote_socket连接的端口为解析出的remote_address的地址
                     if self._is_local:
                         remote_port = self._chosen_server[1]
                     else:
@@ -401,6 +489,7 @@ class TCPRelayHandler(object):
             self.destroy()
             return
         self._update_activity(len(data))
+        # ssserver接收到数据，则对其进行解密
         if not is_local:
             data = self._encryptor.decrypt(data)
             if not data:
@@ -411,14 +500,18 @@ class TCPRelayHandler(object):
             self._write_to_sock(data, self._remote_sock)
             return
         elif is_local and self._stage == STAGE_INIT:
+            # 若未确认服务器，则先返回SOCKS代理的确认信息
+            # '\x05' 为版本号 SOCKS5；'\x00' 表示无验证需求（即不用提供用户名以及密码）
             # TODO check auth method
             self._write_to_sock(b'\x05\00', self._local_sock)
             self._stage = STAGE_ADDR
             return
         elif self._stage == STAGE_CONNECTING:
+            # 已连接远程服务器
             self._handle_stage_connecting(data)
         elif (is_local and self._stage == STAGE_ADDR) or \
                 (not is_local and self._stage == STAGE_INIT):
+            # 已给客户端回复确认信息 或 为ssserver且正处于初始化状态。
             self._handle_stage_addr(data)
 
     def _on_remote_read(self):
@@ -435,11 +528,14 @@ class TCPRelayHandler(object):
             self.destroy()
             return
         self._update_activity(len(data))
+        # 本地服务器则解码数据
         if self._is_local:
             data = self._encryptor.decrypt(data)
+        # 若是远程服务器则编码编码数据
         else:
             data = self._encryptor.encrypt(data)
         try:
+            # 发送给local_sock
             self._write_to_sock(data, self._local_sock)
         except Exception as e:
             shell.print_exception(e)
@@ -485,6 +581,7 @@ class TCPRelayHandler(object):
             logging.debug('ignore handle_event: destroyed')
             return
         # order is important
+        # 远程socket
         if sock == self._remote_sock:
             if event & eventloop.POLL_ERR:
                 self._on_remote_error()
@@ -496,6 +593,7 @@ class TCPRelayHandler(object):
                     return
             if event & eventloop.POLL_OUT:
                 self._on_remote_write()
+        # 本地socket
         elif sock == self._local_sock:
             if event & eventloop.POLL_ERR:
                 self._on_local_error()
@@ -507,6 +605,7 @@ class TCPRelayHandler(object):
                     return
             if event & eventloop.POLL_OUT:
                 self._on_local_write()
+        # socket：怪我咯？
         else:
             logging.warn('unknown socket')
 
@@ -549,6 +648,10 @@ class TCPRelayHandler(object):
 
 
 class TCPRelay(object):
+    """
+    TCP转发器
+    """
+
     def __init__(self, config, dns_resolver, is_local, stat_callback=None):
         self._config = config
         self._is_local = is_local
@@ -571,6 +674,8 @@ class TCPRelay(object):
             listen_port = config['server_port']
         self._listen_port = listen_port
 
+        # 返回的是一个列表，里面每一个成员是一个五元组
+        # [(family, type, proto, canonname, sockaddr)]
         addrs = socket.getaddrinfo(listen_addr, listen_port, 0,
                                    socket.SOCK_STREAM, socket.SOL_TCP)
         if len(addrs) == 0:
@@ -592,11 +697,17 @@ class TCPRelay(object):
         self._stat_callback = stat_callback
 
     def add_to_loop(self, loop):
+        """
+        加入事件循环
+        :param loop:    事件循环
+        :return:
+        """
         if self._eventloop:
             raise Exception('already add to loop')
         if self._closed:
             raise Exception('already closed')
         self._eventloop = loop
+        # 监听
         self._eventloop.add(self._server_socket,
                             eventloop.POLL_IN | eventloop.POLL_ERR, self)
         self._eventloop.add_periodic(self.handle_periodic)
@@ -671,6 +782,8 @@ class TCPRelay(object):
                 raise Exception('server_socket error')
             try:
                 logging.debug('accept')
+                # 创建一个新的连接并建立一个TCPRelayHandler进行处理
+                # accept return (conn, addr)
                 conn = self._server_socket.accept()
                 TCPRelayHandler(self, self._fd_to_handlers,
                                 self._eventloop, conn[0], self._config,

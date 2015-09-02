@@ -98,10 +98,13 @@ class UDPRelay(object):
         self._method = config['method']
         self._timeout = config['timeout']
         self._is_local = is_local
+        # 记录当前存活的client
         self._cache = lru_cache.LRUCache(timeout=config['timeout'],
                                          close_callback=self._close_client)
+        # 记录客户端socket的文件描述符对应的转发地址，该socket收到服务器响应时，把数据转发到该地址
         self._client_fd_to_server_addr = \
             lru_cache.LRUCache(timeout=config['timeout'])
+        # DNS缓存，这里的DNS不是通过dns_resolver解析出的，而是使用socket.getaddrinfo得到的
         self._dns_cache = lru_cache.LRUCache(timeout=300)
         self._eventloop = None
         self._closed = False
@@ -111,6 +114,8 @@ class UDPRelay(object):
         else:
             self._forbidden_iplist = None
 
+        # 返回的是一个列表，里面每一个成员是一个五元组
+        # [(family, type, proto, canonname, sockaddr)]
         addrs = socket.getaddrinfo(self._listen_addr, self._listen_port, 0,
                                    socket.SOCK_DGRAM, socket.SOL_UDP)
         if len(addrs) == 0:
@@ -143,6 +148,10 @@ class UDPRelay(object):
             pass
 
     def _handle_server(self):
+        """
+        服务器有UDP连接
+        :return:
+        """
         server = self._server_socket
         data, r_addr = server.recvfrom(BUF_SIZE)
         if not data:
@@ -183,6 +192,7 @@ class UDPRelay(object):
                 self._dns_cache[server_addr] = addrs
 
         af, socktype, proto, canonname, sa = addrs[0]
+        # 给这个客户端返回一个唯一值而已，一个字符串
         key = client_key(r_addr, af)
         client = self._cache.get(key, None)
         if not client:
@@ -195,7 +205,9 @@ class UDPRelay(object):
                     return
             client = socket.socket(af, socktype, proto)
             client.setblocking(False)
+            # 记录client的关键字
             self._cache[key] = client
+            # 记录client的文件描述符对应的转发地址，若client收到响应udp包则转发到这个地址
             self._client_fd_to_server_addr[client.fileno()] = r_addr
 
             self._sockets.add(client.fileno())
@@ -226,6 +238,7 @@ class UDPRelay(object):
         if self._stat_callback:
             self._stat_callback(self._listen_port, len(data))
         if not self._is_local:
+            # 若为ssserver则加上头后返回
             addrlen = len(r_addr[0])
             if addrlen > 255:
                 # drop
@@ -245,6 +258,7 @@ class UDPRelay(object):
                 return
             # addrtype, dest_addr, dest_port, header_length = header_result
             response = b'\x00\x00\x00' + data
+        # 根据socket文件描述符找到需要向下转发的UDPSOCKET地址
         client_addr = self._client_fd_to_server_addr.get(sock.fileno())
         if client_addr:
             self._server_socket.sendto(response, client_addr)

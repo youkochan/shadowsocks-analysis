@@ -18,6 +18,11 @@
 # from ssloop
 # https://github.com/clowwindy/ssloop
 
+# eventloop使用select、epoll、kqueue等IO复用实现异步处理。
+# 优先级为epoll>kqueue>select。
+# Eventloop将三种复用机制的add，remove，poll，add_handler，remve_handler接口统一起来，
+# 程序员只需要使用这些函数即可，不需要处理底层细节。
+
 from __future__ import absolute_import, division, print_function, \
     with_statement
 
@@ -35,13 +40,12 @@ from shadowsocks import shell
 __all__ = ['EventLoop', 'POLL_NULL', 'POLL_IN', 'POLL_OUT', 'POLL_ERR',
            'POLL_HUP', 'POLL_NVAL', 'EVENT_NAMES']
 
-POLL_NULL = 0x00
-POLL_IN = 0x01
-POLL_OUT = 0x04
-POLL_ERR = 0x08
-POLL_HUP = 0x10
-POLL_NVAL = 0x20
-
+POLL_NULL = 0x00    # POLL事件：无
+POLL_IN = 0x01      # POLL事件：有数据待接收
+POLL_OUT = 0x04     # POLL事件：有数据待发送
+POLL_ERR = 0x08     # POLL数据：错误
+POLL_HUP = 0x10     #
+POLL_NVAL = 0x20    #
 
 EVENT_NAMES = {
     POLL_NULL: 'POLL_NULL',
@@ -57,6 +61,9 @@ TIMEOUT_PRECISION = 10
 
 
 class KqueueLoop(object):
+    """
+    封装的Kqueue
+    """
 
     MAX_EVENTS = 1024
 
@@ -103,6 +110,9 @@ class KqueueLoop(object):
 
 
 class SelectLoop(object):
+    """
+    封装的Select
+    """
 
     def __init__(self):
         self._r_list = set()
@@ -143,7 +153,12 @@ class SelectLoop(object):
 
 
 class EventLoop(object):
+    """
+    事件轮询类，默认使用EPOLL模型
+    不支持EPOLL时，使用封装好的SELECT或者KQUEUE
+    """
     def __init__(self):
+        # 判断当前操作系统是否支持 EPOLL 以及 KQUEUE
         if hasattr(select, 'epoll'):
             self._impl = select.epoll()
             model = 'epoll'
@@ -156,44 +171,61 @@ class EventLoop(object):
         else:
             raise Exception('can not find any available functions in select '
                             'package')
-        self._fdmap = {}  # (f, handler)
-        self._last_time = time.time()
+
+        # 用于将文件描述符fd对应到文件f以及处理函数handler，fd -> (f, handler)
+        self._fdmap = {}
+        # 上一次执行周期回调函数的时间
+        self._last_time = time.time()   
+        # 周期回调函数列表
         self._periodic_callbacks = []
+        # 轮询终止？
         self._stopping = False
         logging.debug('using event model: %s', model)
 
+    # 等待事件
     def poll(self, timeout=None):
         events = self._impl.poll(timeout)
         return [(self._fdmap[fd][0], fd, event) for fd, event in events]
 
+    # 新增监听
     def add(self, f, mode, handler):
         fd = f.fileno()
+        # 绑定文件描述符fd对应的文件f以及处理函数handler
         self._fdmap[fd] = (f, handler)
+        # 注册文件描述符fd的监听事件
         self._impl.register(fd, mode)
 
+    # 移除监听
     def remove(self, f):
         fd = f.fileno()
         del self._fdmap[fd]
+        # 移除文件描述符fd的监听事件
         self._impl.unregister(fd)
 
+    # 增加周期性回调函数
     def add_periodic(self, callback):
         self._periodic_callbacks.append(callback)
 
+    # 移除周期性回调函数
     def remove_periodic(self, callback):
         self._periodic_callbacks.remove(callback)
 
+    # 修改事件类型
     def modify(self, f, mode):
         fd = f.fileno()
         self._impl.modify(fd, mode)
 
+    # 停止事件循环
     def stop(self):
         self._stopping = True
 
+    # 用于轮询处理事件
     def run(self):
         events = []
         while not self._stopping:
             asap = False
             try:
+                # 等待事件
                 events = self.poll(TIMEOUT_PRECISION)
             except (OSError, IOError) as e:
                 if errno_from_exception(e) in (errno.EPIPE, errno.EINTR):
@@ -208,6 +240,7 @@ class EventLoop(object):
                     traceback.print_exc()
                     continue
 
+            # 文件sock，文件描述符fd，事件event
             for sock, fd, event in events:
                 handler = self._fdmap.get(fd, None)
                 if handler is not None:

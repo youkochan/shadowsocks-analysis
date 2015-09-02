@@ -31,20 +31,32 @@ import time
 #       as sweep() causes long pause
 
 
+# 用到了容器基类 collections.MutableMapping
 class LRUCache(collections.MutableMapping):
     """This class is not thread safe"""
 
     def __init__(self, timeout=60, close_callback=None, *args, **kwargs):
+        # 超时时间（单位秒）
         self.timeout = timeout
+        # 关闭回调函数
         self.close_callback = close_callback
+        # 实际存储值的一个字典
         self._store = {}
+        # time -> [key1, key2, ...]
         self._time_to_keys = collections.defaultdict(list)
+        # 记录每一个key的最后访问时间
         self._keys_to_last_time = {}
+        # 最后访问时间队列
         self._last_visits = collections.deque()
         self._closed_values = set()
         self.update(dict(*args, **kwargs))  # use the free update to set keys
 
     def __getitem__(self, key):
+        """
+        重载，根据key取得对应的val
+        :param key:
+        :return:
+        """
         # O(1)
         t = time.time()
         self._keys_to_last_time[key] = t
@@ -53,6 +65,12 @@ class LRUCache(collections.MutableMapping):
         return self._store[key]
 
     def __setitem__(self, key, value):
+        """
+        重载，设置key对应的val
+        :param key:
+        :param value:
+        :return:
+        """
         # O(1)
         t = time.time()
         self._keys_to_last_time[key] = t
@@ -61,6 +79,11 @@ class LRUCache(collections.MutableMapping):
         self._last_visits.append(t)
 
     def __delitem__(self, key):
+        """
+        重载，删除key
+        :param key:
+        :return:
+        """
         # O(1)
         del self._store[key]
         del self._keys_to_last_time[key]
@@ -70,6 +93,11 @@ class LRUCache(collections.MutableMapping):
 
     def __len__(self):
         return len(self._store)
+
+    # 先找访问时间_last_visits中超出timeout的所有键
+    # 然后去找_time_to_keys，找出所有可能过期的键
+    # 因为最早访问时间访问过的键之后可能又访问了，所以要看_keys_to_last_time
+    # 找出那些没被访问过的，然后删除
 
     def sweep(self):
         # O(m)
@@ -83,6 +111,7 @@ class LRUCache(collections.MutableMapping):
                 for key in self._time_to_keys[least]:
                     if key in self._store:
                         if now - self._keys_to_last_time[key] > self.timeout:
+                            # 这个时候value实际是一个client
                             value = self._store[key]
                             if value not in self._closed_values:
                                 self.close_callback(value)
