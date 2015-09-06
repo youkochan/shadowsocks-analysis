@@ -24,6 +24,9 @@ import socket
 import logging
 import json
 import collections
+import signal
+import sys
+import os
 
 from shadowsocks import common, eventloop, tcprelay, udprelay, asyncdns, shell
 
@@ -43,6 +46,7 @@ class Manager(object):
 
         self._statistics = collections.defaultdict(int)
         self._control_client_addr = None
+        self._control_client_url = None
         try:
             manager_address = config['manager_address']
             if ':' in manager_address:
@@ -56,6 +60,7 @@ class Manager(object):
                     exit(1)
             else:
                 addr = manager_address
+                self._control_client_url = addr
                 family = socket.AF_UNIX
             self._control_socket = socket.socket(family,
                                                  socket.SOCK_DGRAM)
@@ -184,7 +189,29 @@ class Manager(object):
                     if self._config['verbose']:
                         traceback.print_exc()
 
+    def handle_sigquit(self, signum, _):
+        logging.warn('received SIGQUIT, doing graceful shutting down..')
+
+        self._control_socket.close()
+
+        for port in self._relays:
+            t, u = self._relays[port]
+            t.close(next_tick=True)
+            u.close(next_tick=True)
+        try:
+            if self._control_client_url:
+                os.remove(self._control_client_url)
+        except OSError:
+            pass
+
+    def handle_sigint(self, signum, _):
+        sys.exit(1)
+
     def run(self):
+        # fix
+        signal.signal(getattr(signal, 'SIGQUIT', signal.SIGTERM), self.handle_sigquit)
+        signal.signal(signal.SIGINT, self.handle_sigint)
+
         self._loop.run()
 
 
