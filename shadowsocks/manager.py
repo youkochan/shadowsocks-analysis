@@ -27,24 +27,30 @@ import collections
 import signal
 import sys
 import os
+import datetime
 
 from shadowsocks import common, eventloop, tcprelay, udprelay, asyncdns, shell
 
 
 BUF_SIZE = 1506
 STAT_SEND_LIMIT = 100
-
+LIMIT_MULTIPLE = 1048576  # 1M = 1048576 BYTES
 
 class Manager(object):
 
     def __init__(self, config):
         self._config = config
+        self._port_info = {}
         self._relays = {}  # (tcprelay, udprelay)
         self._loop = eventloop.EventLoop()
         self._dns_resolver = asyncdns.DNSResolver()
         self._dns_resolver.add_to_loop(self._loop)
 
+        self._last_day = datetime.date.today().day
         self._statistics = collections.defaultdict(int)
+        # 使用 _statistics_sum 来记录每天使用的流量的总量，每天凌晨刷新
+        self._statistics_sum = collections.defaultdict(int)
+
         self._control_client_addr = None
         self._control_client_url = None
         try:
@@ -75,21 +81,48 @@ class Manager(object):
         self._loop.add_periodic(self.handle_periodic)
 
         port_password = config['port_password']
+        port_limit = config['port_limit']
+
         del config['port_password']
+        del config['port_limit']
+
+        if port_limit is None:
+            port_limit = {}
+
         for port, password in port_password.items():
             a_config = config.copy()
             a_config['server_port'] = int(port)
             a_config['password'] = password
-            self.add_port(a_config)
+            if port in port_limit:
+                a_config['limit'] = int(port_limit[port]) * LIMIT_MULTIPLE
+            self.add_user(a_config)
+
+    def add_user(self, config):
+        port = int(config['server_port'])
+        if port in self._port_info:
+            logging.error("user already exists at %s:%d" % (config['server'], port))
+            return
+        logging.info("adding user at %s:%d" % (config['server'], port))
+        self._port_info[port] = config
+        self.add_port(config)
+
+    def remove_user(self, config):
+        port = int(config['server_port'])
+        if port not in self._port_info:
+            logging.error("user not exist at %s:%d" % (config['server'], port))
+            return
+        logging.info("removing user at %s:%d" % (config['server'], port))
+        if port in self._relays:
+            self.remove_port(config)
+        del self._port_info[port]
 
     def add_port(self, config):
         port = int(config['server_port'])
         servers = self._relays.get(port, None)
         if servers:
-            logging.error("server already exists at %s:%d" % (config['server'],
-                                                              port))
+            logging.error("port already opened at %s:%d" % (config['server'], port))
             return
-        logging.info("adding server at %s:%d" % (config['server'], port))
+        logging.info("opening port at %s:%d" % (config['server'], port))
         t = tcprelay.TCPRelay(config, self._dns_resolver, False,
                               self.stat_callback)
         u = udprelay.UDPRelay(config, self._dns_resolver, False,
@@ -102,14 +135,13 @@ class Manager(object):
         port = int(config['server_port'])
         servers = self._relays.get(port, None)
         if servers:
-            logging.info("removing server at %s:%d" % (config['server'], port))
+            logging.info("closing port at %s:%d" % (config['server'], port))
             t, u = servers
             t.close(next_tick=False)
             u.close(next_tick=False)
             del self._relays[port]
         else:
-            logging.error("server not exist at %s:%d" % (config['server'],
-                                                         port))
+            logging.error("port not open at %s:%d" % (config['server'], port))
 
     def handle_event(self, sock, fd, event):
         if sock == self._control_socket and event == eventloop.POLL_IN:
@@ -125,10 +157,10 @@ class Manager(object):
                     logging.error('can not find server_port in config')
                 else:
                     if command == 'add':
-                        self.add_port(a_config)
+                        self.add_user(a_config)
                         self._send_control_data(b'ok')
                     elif command == 'remove':
-                        self.remove_port(a_config)
+                        self.remove_user(a_config)
                         self._send_control_data(b'ok')
                     elif command == 'ping':
                         self._send_control_data(b'pong')
@@ -153,8 +185,10 @@ class Manager(object):
 
     def stat_callback(self, port, data_len):
         self._statistics[port] += data_len
+        self._statistics_sum[port] += data_len
 
     def handle_periodic(self):
+
         r = {}
         i = 0
 
@@ -165,15 +199,34 @@ class Manager(object):
                                                   separators=(',', ':')))
                 self._send_control_data(b'stat: ' + data)
 
-        for k, v in self._statistics.items():
-            r[k] = v
-            i += 1
-            # split the data into segments that fit in UDP packets
-            if i >= STAT_SEND_LIMIT:
-                send_data(r)
-                r.clear()
-        send_data(r)
+        if self._control_client_addr:
+            for k, v in self._statistics.items():
+                r[k] = v
+                i += 1
+                # split the data into segments that fit in UDP packets
+                if i >= STAT_SEND_LIMIT:
+                    send_data(r)
+                    r.clear()
+            send_data(r)
         self._statistics.clear()
+
+        day = datetime.date.today().day
+        if day != self._last_day:
+            self._statistics_sum.clear()
+            self._last_day = day
+            # reopen those blocked port
+            for k, v in self._port_info.items():
+                if k not in self._relays:
+                    self.add_port(v)
+
+        # check limits, only check those working relays
+        for port in self._relays.keys():
+            a_config = self._port_info[port]
+            if self._statistics_sum[port] > a_config.get('limit', float("Inf")):
+                logging.info('port %s exceed limit' % port)
+                # them close this port
+                self.remove_port(a_config)
+                self._send_control_data(b'close port %s' % port)
 
     def _send_control_data(self, data):
         if self._control_client_addr:
@@ -192,8 +245,6 @@ class Manager(object):
     def handle_sigquit(self, signum, _):
         logging.warn('received SIGQUIT, doing graceful shutting down..')
 
-        self._control_socket.close()
-
         for port in self._relays:
             t, u = self._relays[port]
             t.close(next_tick=True)
@@ -203,6 +254,11 @@ class Manager(object):
                 os.remove(self._control_client_url)
         except OSError:
             pass
+
+        if self._loop:
+            self._loop.remove(self._control_socket)
+            self._loop.remove_periodic(self.handle_periodic)
+        self._control_socket.close()
 
     def handle_sigint(self, signum, _):
         sys.exit(1)
