@@ -242,30 +242,16 @@ class Manager(object):
                     if self._config['verbose']:
                         traceback.print_exc()
 
-    def handle_sigquit(self, signum, _):
-        logging.warn('received SIGQUIT, doing graceful shutting down..')
-
-        for port in self._relays:
-            t, u = self._relays[port]
-            t.close(next_tick=True)
-            u.close(next_tick=True)
+    def handle_sigint(self, signum, _):
         try:
             if self._control_client_url:
                 os.remove(self._control_client_url)
         except OSError:
             pass
-
-        if self._loop:
-            self._loop.remove(self._control_socket)
-            self._loop.remove_periodic(self.handle_periodic)
-        self._control_socket.close()
-
-    def handle_sigint(self, signum, _):
         sys.exit(1)
 
     def run(self):
         # fix
-        signal.signal(getattr(signal, 'SIGQUIT', signal.SIGTERM), self.handle_sigquit)
         signal.signal(signal.SIGINT, self.handle_sigint)
 
         self._loop.run()
