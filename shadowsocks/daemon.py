@@ -28,7 +28,7 @@ from shadowsocks import common, shell
 # this module is ported from ShadowVPN daemon.c
 
 # 2015-08-13 23:26 BY Youkochan
-# 守护进程
+# 后台进程
 
 def daemon_exec(config):
     if 'daemon' in config:

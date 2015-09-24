@@ -5,3 +5,9 @@ This work is licensed under a [Creative Commons Attribution-NonCommercial-ShareA
 *此份代码仅用作学术交流用途，其他行为带来的后果本人概不负责*
 
 *This copy of code is for study of python only*
+
+---
+
+# update log
+
+2015-9-21: add user traffic management function
