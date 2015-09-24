@@ -85,6 +85,7 @@ class Manager(object):
 
         del config['port_password']
         del config['port_limit']
+        del config['server_port']
 
         if port_limit is None:
             port_limit = {}
@@ -153,19 +154,31 @@ class Manager(object):
                 if config:
                     # let the command override the configuration file
                     a_config.update(config)
-                if 'server_port' not in a_config:
-                    logging.error('can not find server_port in config')
-                else:
+                command = command.strip()
+
+                # 加一些检测命令的语句，防止错误的指令轻易地使服务器崩溃
+                try:
                     if command == 'add':
+                        assert 'server_port' in a_config
+                        assert 'password' in a_config
+                        assert type(a_config['server_port']) is int
+                        assert type(a_config['password']) is str
                         self.add_user(a_config)
                         self._send_control_data(b'ok')
                     elif command == 'remove':
+                        assert 'server_port' in a_config
+                        assert type(a_config['server_port']) is int
                         self.remove_user(a_config)
                         self._send_control_data(b'ok')
                     elif command == 'ping':
                         self._send_control_data(b'pong')
                     else:
                         logging.error('unknown command %s', command)
+                        self._send_control_data(b'unknown command')
+                except AssertionError:
+                    self._send_control_data(b'error command')
+            else:
+                self._send_control_data(b'error command')
 
     def _parse_command(self, data):
         # commands:
